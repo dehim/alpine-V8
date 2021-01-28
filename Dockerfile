@@ -95,7 +95,7 @@ RUN \
 # STEP 3
 # Build V8 for alpine
 #
-FROM alpine:latest as v8
+FROM alpine:3.10 as v8
 
 COPY --from=source /tmp/v8 /tmp/v8
 COPY --from=gn-builder /usr/local/bin/gn /tmp/v8/buildtools/linux64/gn
