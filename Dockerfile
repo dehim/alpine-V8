@@ -1,104 +1,186 @@
-FROM alpine:3.9
+#
+# Building V8 for alpine is a real pain. We have to compile from source, because it has to be
+# linked against musl, and we also have to recompile some of the build tools as the official
+# build workflow tends to assume glibc by including vendored tools that link against it.
+#
+# The general strategy is this:
+#
+#   1. Build GN for alpine (this is a build dependency)
+#   2. Use depot_tools to fetch the V8 source and dependencies (needs glibc)
+#   3. Build V8 for alpine
+#   4. Make warez
+#
 
-LABEL maintainer="Dehim"
+#
+# STEP 1
+# Build GN for alpine
+#
+FROM alpine:3.9 as gn-builder
 
-ARG V8_VERSION=7.4.51
-ARG V8_DIR=/usr/local/v8
+# This is the GN commit that we want to build. Most commits will probably build just fine but
+# this happened to be the latest commit when I did this.
+ ARG GN_COMMIT=94bda7cce36ab07c0f43da66507572eb00802829
 
-ARG BUILD_COMMIT=c1ab94d375f10578b3d207eca8fe4fb35274efb7
-ARG BUILDTOOLS_COMMIT=6fbda1b24c1893a893b17aa219b765b9e7c801d8
-ARG ICU_COMMIT=07e7295d964399ee7bee16a3ac7ca5a053b2cf0a
-ARG GTEST_COMMIT=879ac092fde0a19e1b3a61b2546b2a422b1528bc
-ARG TRACE_EVENT_COMMIT=e31a1706337ccb9a658b37d29a018c81695c6518
-ARG CLANG_COMMIT=3114fbc11f9644c54dd0a4cdbfa867bac50ff983
-ARG JINJA2_COMMIT=b41863e42637544c2941b574c7877d3e1f663e25
-ARG MARKUPSAFE_COMMIT=8f45f5cfa0009d2a70589bcda0349b8cb2b72783
-ARG CATAPULT_COMMIT=b6cc5a6baf93cfa6feeb240eea75c454506b0c3c
+RUN \
+  apk add --update --virtual .gn-build-dependencies \
+    alpine-sdk \
+    binutils-gold \
+    clang \
+    curl \
+    git \
+    llvm \
+    ninja \
+    python \
+    tar \
+    xz \
 
-ARG GN_SOURCE=https://www.dropbox.com/s/3ublwqh4h9dit9t/alpine-gn-80e00be.tar.gz
-ARG V8_SOURCE=https://chromium.googlesource.com/v8/v8/+archive/${V8_VERSION}.tar.gz
+  # Two quick fixes: we need the LLVM tooling in $PATH, and we
+  # also have to use gold instead of ld.
+  && PATH=$PATH:/usr/lib/llvm5/bin \
+  && cp -f /usr/bin/ld.gold /usr/bin/ld \
 
-ENV V8_VERSION=${V8_VERSION} \
-    V8_DIR=${V8_DIR}
+  # Clone and build gn
+  && git clone https://gn.googlesource.com/gn /tmp/gn \
+#  && git -C /tmp/gn checkout ${GN_COMMIT} \
+  && cd /tmp/gn \
+#  && python build/gen.py --no-sysroot \
+  && python build/gen.py \
+  && ninja -C out \
+  && cp -f /tmp/gn/out/gn /usr/local/bin/gn \
 
-RUN set -x \
-  && apk add --update --virtual .v8-build-dependencies \
-    at-spi2-core-dev \
+  # Remove build dependencies and temporary files
+  && apk del .gn-build-dependencies \
+  && rm -rf /tmp/* /var/tmp/* /var/cache/apk/*
+
+#
+# STEP 2
+# Use depot_tools to fetch the V8 source and dependencies
+#
+# The depot_tools scripts have a hard dependency on glibc (or at least a soft one that I didn't
+# bother figuring out). Fortunately we only need it to actually download the source and its dependencies
+# so we can do this in a place with glibc, and then pass the results on to an alpine builder.
+#
+FROM debian:9 as source
+
+# The V8 version we want to use. It's assumed that this will be a version tag, but it's just
+# used as "git commit $V8_VERSION" so anything that git can resolve will work.
+ARG V8_VERSION=9.0.93
+
+RUN \
+  set -x && \
+  apt-get update && \
+  apt-get install -y \
+    git \
+    curl \
+    python \
+    sudo \
+    bash \
+
+
+  && groupadd www \
+  && useradd -g www -d /home/www -s /bin/bash -m www \
+#  && adduser --ingroup www -D --shell /bin/bash hiram \
+#  && addgroup -g 10001 -S hiram \
+#  && adduser hiram -D -S -s /bin/bash -G hiram \
+#  && addgroup -g 10001 -S groupA \
+#  && adduser  userA -u 20001 -D -S -s /bin/bash -G groupA \
+  && echo "www ALL=(ALL:ALL) ALL \nwww ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/default \
+  && chmod 440 /etc/sudoers.d/default \
+  && su www && \
+
+  # Clone depot_tools
+  git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools && \
+  PATH=$PATH:/tmp/depot_tools && \
+
+  # fetch V8
+  cd /tmp && \
+  fetch v8 && \
+  cd /tmp/v8 && \
+  git checkout ${V8_VERSION} && \
+  gclient sync && \
+
+  sudo -i && \
+
+
+  # cleanup
+  apt-get remove --purge -y \
+    git \
+    curl \
+    python && \
+  apt-get autoremove -y && \
+  rm -rf /var/lib/apt/lists/*
+
+#
+# STEP 3
+# Build V8 for alpine
+#
+FROM alpine:3.9 as v8
+
+COPY --from=source /tmp/v8 /tmp/v8
+COPY --from=gn-builder /usr/local/bin/gn /tmp/v8/buildtools/linux64/gn
+
+RUN \
+  apk add --update --virtual .v8-build-dependencies \
+    libevent \
+    libexecinfo \
     curl \
     g++ \
     gcc \
     glib-dev \
     icu-dev \
+    libstdc++ \
     linux-headers \
     make \
     ninja \
     python \
     tar \
-    xz \
-  && : "---------- V8 ----------" \
-  && mkdir -p /tmp/v8 \
-  && curl -fSL --connect-timeout 30 ${V8_SOURCE} | tar xmz -C /tmp/v8 \
-  && : "---------- Dependencies ----------" \
-  && DEPS=" \
-    chromium/buildtools.git@${BUILDTOOLS_COMMIT}:buildtools; \
-    chromium/src/build.git@${BUILD_COMMIT}:build; \
-    chromium/src/base/trace_event/common.git@${TRACE_EVENT_COMMIT}:base/trace_event/common; \
-    chromium/src/tools/clang.git@${CLANG_COMMIT}:tools/clang; \
-    chromium/src/third_party/jinja2.git@${JINJA2_COMMIT}:third_party/jinja2; \
-    chromium/src/third_party/markupsafe.git@${MARKUPSAFE_COMMIT}:third_party/markupsafe; \
-    chromium/deps/icu.git@${ICU_COMMIT}:third_party/icu; \
-    external/github.com/google/googletest.git@${GTEST_COMMIT}:third_party/googletest/src; \
-    catapult.git@${CATAPULT_COMMIT}:third_party/catapult \
-  " \
-  && while [ "${DEPS}" ]; do \
-    dep="${DEPS%%;*}" \
-    link="${dep%%:*}" \
-    url="${link%%@*}" url="${url#"${url%%[![:space:]]*}"}" \
-    hash="${link#*@}" \
-    dir="${dep#*:}"; \
-    [ -n "${dep}" ] \
-      && dep_url="https://chromium.googlesource.com/${url}/+archive/${hash}.tar.gz" \
-      && dep_dir="/tmp/v8/${dir}" \
-      && mkdir -p ${dep_dir} \
-      && curl -fSL --connect-timeout 30 ${dep_url} | tar xmz -C ${dep_dir} \
-      & [ "${DEPS}" = "${dep}" ] && DEPS='' || DEPS="${DEPS#*;}"; \
-    done; \
-    wait \
-  && : "---------- Downloads the current stable Linux sysroot ----------" \
-  && /tmp/v8/build/linux/sysroot_scripts/install-sysroot.py --arch=amd64 \
-  && : "---------- Proper GN ----------" \
-  && apk add --virtual .gn-runtime-dependencies \
-    libevent \
-    libexecinfo \
-    libstdc++ \
-  && curl -fSL --connect-timeout 30 ${GN_SOURCE} | tar xmz -C /tmp/v8/buildtools/linux64/ \
-  && : "---------- Build instructions ----------" \
-  && cd /tmp/v8 \
-  && ./tools/dev/v8gen.py \
-    x64.release \
-    -- \
-      binutils_path=\"/usr/bin\" \
-      target_os=\"linux\" \
-      target_cpu=\"x64\" \
-      v8_target_cpu=\"x64\" \
-      v8_use_external_startup_data=false \
-      is_official_build=true \
-      is_component_build=true \
-      is_cfi=false \
-      is_clang=false \
-      use_custom_libcxx=false \
-      use_sysroot=false \
-      use_gold=false \
-      use_allocator_shim=false \
-      treat_warnings_as_errors=false \
-      symbol_level=0 \
-  && : "---------- Build ----------" \
-  && ninja d8 -C out.gn/x64.release/ -j $(getconf _NPROCESSORS_ONLN) \
-  && : "---------- Extract shared libraries ----------" \
-  && mkdir -p ${V8_DIR}/include ${V8_DIR}/lib \
-  && cp -R /tmp/v8/include/* ${V8_DIR}/include/ \
-  && (cd /tmp/v8/out.gn/x64.release; \
-      cp lib*.so icudtl.dat ${V8_DIR}/lib/) \
-  && : "---------- Removing build dependencies, clean temporary files ----------" \
-  && apk del .v8-build-dependencies .gn-runtime-dependencies \
-  && rm -rf /var/cache/apk/* /var/tmp/* /tmp/*
+    xz
+
+  # Configure our V8 build
+RUN cd /tmp/v8 && \
+  ./tools/dev/v8gen.py x64.release -- \
+    binutils_path=\"/usr/bin\" \
+    target_os=\"linux\" \
+    target_cpu=\"x64\" \
+    v8_target_cpu=\"x64\" \
+    v8_use_external_startup_data=false \
+    is_official_build=true \
+    is_component_build=true \
+    is_cfi=false \
+    is_clang=false \
+    use_custom_libcxx=false \
+    use_sysroot=false \
+    use_gold=false \
+    use_allocator_shim=false \
+    treat_warnings_as_errors=false \
+    symbol_level=0 \
+    v8_enable_future=true \
+    strip_debug_info=true \
+    v8_enable_i18n_support=false \
+    v8_enable_gdbjit=false \
+    v8_static_library=true \
+    v8_experimental_extra_library_files=[] \
+    v8_extra_library_files=[]
+
+
+  # Build V8
+RUN ninja -C /tmp/v8/out.gn/x64.release -j $(getconf _NPROCESSORS_ONLN)
+
+  # Brag
+RUN find /tmp/v8/out.gn/x64.release -name '*.a'
+
+  # clean up
+RUN apk del .v8-build-dependencies
+
+
+#
+# STEP 4
+# Provide slim image with V8
+#
+FROM alpine:3.9
+
+COPY --from=v8 /tmp/v8/include /tmp/v8/include
+COPY --from=v8 /tmp/v8/out.gn/x64.release/obj /tmp/v8/lib
+COPY --from=v8 /tmp/v8 /v8
+
+CMD ["/bin/sh", "-c"]
