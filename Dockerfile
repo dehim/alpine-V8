@@ -27,7 +27,7 @@ RUN \
     clang \
     curl \
     git \
-    llvm9 \
+    llvm \
     ninja \
     python \
     tar \
