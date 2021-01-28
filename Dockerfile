@@ -12,7 +12,7 @@
 # STEP 1
 # Build GN for alpine
 #
-FROM alpine:latest as gn-builder
+FROM alpine:3.9 as gn-builder
 
 # This is the GN commit that we want to build. Most commits will probably build just fine but
 # this happened to be the latest commit when I did this.
