@@ -12,7 +12,7 @@
 # STEP 1
 # Build GN for alpine
 #
-FROM alpine:3.9 as gn-builder
+FROM alpine:3.10 as gn-builder
 
 # This is the GN commit that we want to build. Most commits will probably build just fine but
 # this happened to be the latest commit when I did this.
@@ -27,15 +27,15 @@ RUN \
     clang \
     curl \
     git \
-    llvm \
+    llvm9 \
     ninja \
     python \
     tar \
-    xz \
+    xz
 
   # Two quick fixes: we need the LLVM tooling in $PATH, and we
   # also have to use gold instead of ld.
-  && PATH=$PATH:/usr/lib/llvm9/bin \
+RUN PATH=$PATH:/usr/lib/llvm9/bin \
   && cp -f /usr/bin/ld.gold /usr/bin/ld \
 
   # Clone and build gn
@@ -62,9 +62,8 @@ FROM debian:9 as source
 
 # The V8 version we want to use. It's assumed that this will be a version tag, but it's just
 # used as "git commit $V8_VERSION" so anything that git can resolve will work.
-# https://chromium.googlesource.com/v8/v8/
+# ARG V8_VERSION=8.8
 ARG V8_VERSION=8.2.89
-
 
 RUN \
   set -x && \
@@ -82,7 +81,7 @@ RUN \
   cd /tmp && \
   fetch v8 && \
   cd /tmp/v8 && \
-  git checkout ${V8_VERSION} && \
+  git checkout branch-heads/${V8_VERSION} && \
   gclient sync && \
 
   # cleanup
@@ -93,17 +92,15 @@ RUN \
   apt-get autoremove -y && \
   rm -rf /var/lib/apt/lists/*
 
-#
-# STEP 3
-# Build V8 for alpine
-#
 FROM alpine:3.10 as v8
 
-COPY --from=source /tmp/v8 /tmp/v8
-COPY --from=gn-builder /usr/local/bin/gn /tmp/v8/buildtools/linux64/gn
+WORKDIR /build/v8
+
+COPY --from=source /tmp/v8 /build/v8
+COPY --from=gn-builder /usr/local/bin/gn /build/v8/buildtools/linux64/gn
 
 RUN \
-  apk add --update --virtual .v8-build-dependencies \
+  apk add --update \
     curl \
     g++ \
     gcc \
@@ -115,39 +112,11 @@ RUN \
     ninja \
     python \
     tar \
-    xz \
+    xz
 
-  # Configure our V8 build
-  && cd /tmp/v8 && \
-  ./tools/dev/v8gen.py x64.release -- \
-    binutils_path=\"/usr/bin\" \
-    target_os=\"linux\" \
-    target_cpu=\"x64\" \
-    v8_target_cpu=\"x64\" \
-    v8_enable_future=true \
-    is_official_build=true \
-    is_component_build=true \
-    is_cfi=false \
-    is_clang=false \
-    use_custom_libcxx=false \
-    use_sysroot=false \
-    use_gold=false \
-    use_allocator_shim=false \
-    treat_warnings_as_errors=false \
-    symbol_level=0 \
-    strip_debug_info=true \
-    v8_use_external_startup_data=false \
-    v8_enable_i18n_support=false \
-    v8_enable_gdbjit=false \
-    v8_static_library=true \
-    v8_experimental_extra_library_files=[] \
-    v8_extra_library_files=[] \
+RUN ./tools/dev/v8gen.py x64.release -- target_os=\"linux\" target_cpu=\"x64\" v8_target_cpu=\"x64\" v8_use_external_startup_data=false v8_enable_future=true is_official_build=true is_component_build=false is_cfi=false is_asan=false is_clang=false use_custom_libcxx=false use_sysroot=false use_gold=false treat_warnings_as_errors=false is_desktop_linux=false v8_enable_i18n_support=false symbol_level=0 v8_static_library=true v8_monolithic=true proprietary_codecs=false toolkit_views=false use_aura=false use_dbus=false use_gio=false use_glib=false use_ozone=false use_udev=false clang_use_chrome_plugins=false v8_deprecation_warnings=false v8_enable_gdbjit=false v8_imminent_deprecation_warnings=false v8_untrusted_code_mitigations=false v8_enable_pointer_compression=true
 
-  # Build V8
-  && ninja -C out.gn/x64.release -j $(getconf _NPROCESSORS_ONLN) \
-
-  # Brag
-  && find /tmp/v8/out.gn/x64.release -name '*.a'
+RUN ninja v8_monolith -C out.gn/x64.release/ -j $(getconf _NPROCESSORS_ONLN)
 
 #
 # STEP 4
