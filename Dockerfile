@@ -12,7 +12,7 @@
 # STEP 1
 # Build GN for alpine
 #
-FROM alpine:3.10 as gn-builder
+FROM alpine:3.11 as gn-builder
 
 # This is the GN commit that we want to build. Most commits will probably build just fine but
 # this happened to be the latest commit when I did this.
@@ -92,7 +92,7 @@ RUN \
   apt-get autoremove -y && \
   rm -rf /var/lib/apt/lists/*
 
-FROM alpine:3.10 as v8
+FROM alpine:3.11 as v8
 
 WORKDIR /build/v8
 
